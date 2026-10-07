@@ -2804,6 +2804,107 @@ func TestSmallSegReceiveWindowAdvertisement(t *testing.T) {
 	}
 }
 
+// TestSmallSegmentsQueuedWhileNotReading tests that a receiver that is not
+// reading queues every segment sent within its advertised window, however
+// small the segments are.
+func TestSmallSegmentsQueuedWhileNotReading(t *testing.T) {
+	const (
+		nicID  = 1
+		writes = 3000
+		// Large enough to advertise a window for all the data, small enough
+		// that the segments overflow it if each is charged its full overhead.
+		rcvBufSize = 256 << 10
+	)
+	msg := []byte("+PONG\r\n")
+	total := writes * len(msg)
+
+	s := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+	})
+	defer s.Destroy()
+	if err := s.CreateNIC(nicID, loopback.New()); err != nil {
+		t.Fatalf("CreateNIC(%d, _): %s", nicID, err)
+	}
+	addr := tcpip.ProtocolAddress{
+		Protocol:          ipv4.ProtocolNumber,
+		AddressWithPrefix: tcpip.AddrFromSlice([]byte("\x7f\x00\x00\x01")).WithPrefix(),
+	}
+	if err := s.AddProtocolAddress(nicID, addr, stack.AddressProperties{}); err != nil {
+		t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", nicID, addr, err)
+	}
+	s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: nicID}})
+
+	listenerEntry, listenerCh := waiter.NewChannelEntry(waiter.ReadableEvents)
+	var listenerWQ waiter.Queue
+	listenerWQ.EventRegister(&listenerEntry)
+	defer listenerWQ.EventUnregister(&listenerEntry)
+	listener, err := s.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &listenerWQ)
+	if err != nil {
+		t.Fatalf("NewEndpoint: %s", err)
+	}
+	defer listener.Close()
+	if err := listener.Bind(tcpip.FullAddress{}); err != nil {
+		t.Fatalf("Bind: %s", err)
+	}
+	if err := listener.Listen(1); err != nil {
+		t.Fatalf("Listen: %s", err)
+	}
+	localAddress, err := listener.GetLocalAddress()
+	if err != nil {
+		t.Fatalf("GetLocalAddress: %s", err)
+	}
+
+	var clientWQ waiter.Queue
+	client, err := s.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &clientWQ)
+	if err != nil {
+		t.Fatalf("NewEndpoint: %s", err)
+	}
+	defer client.Close()
+	client.SocketOptions().SetReceiveBufferSize(rcvBufSize, true /* notify */)
+	if err := client.Connect(localAddress); err != nil {
+		if _, ok := err.(*tcpip.ErrConnectStarted); !ok {
+			t.Fatalf("Connect: %s", err)
+		}
+	}
+	<-listenerCh
+	server, _, err := listener.Accept(nil)
+	if err != nil {
+		t.Fatalf("Accept: %s", err)
+	}
+	defer server.Close()
+
+	for i := 0; i < writes; i++ {
+		var r bytes.Reader
+		r.Reset(msg)
+		if n, err := server.Write(&r, tcpip.WriteOptions{}); err != nil || n != int64(len(msg)) {
+			t.Fatalf("Write #%d = (%d, %v)", i, n, err)
+		}
+	}
+
+	queued := 0
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if queued, err = client.GetSockOptInt(tcpip.ReceiveQueueSizeOption); err != nil {
+			t.Fatalf("GetSockOptInt(ReceiveQueueSizeOption): %s", err)
+		}
+		if queued == total {
+			break
+		}
+	}
+	if queued != total {
+		t.Fatalf("receiver queued %d of %d bytes; dropped %d segments", queued, total,
+			client.Stats().(*tcp.Stats).ReceiveErrors.SegmentQueueDropped.Value())
+	}
+
+	var got bytes.Buffer
+	if _, err := client.Read(&got, tcpip.ReadOptions{}); err != nil {
+		t.Fatalf("Read: %s", err)
+	}
+	if want := bytes.Repeat(msg, writes); !bytes.Equal(got.Bytes(), want) {
+		t.Errorf("read data does not match what was written")
+	}
+}
+
 func TestNoWindowShrinking(t *testing.T) {
 	c := context.New(t, e2e.DefaultMTU)
 	defer c.Cleanup()
