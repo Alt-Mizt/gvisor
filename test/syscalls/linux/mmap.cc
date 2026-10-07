@@ -686,6 +686,47 @@ TEST_F(MMapTest, MprotectProtNone) {
   EXPECT_THAT(InForkedProcess(rest), IsPosixErrorOkAndHolds(0));
 }
 
+// Returns the si_code of the SIGSEGV raised by reading or writing addr.
+int SigsegvCode(void* addr, bool write) {
+  struct sigaction sa = {};
+  sa.sa_sigaction = MprotectProtNoneHandler;
+  sa.sa_flags = SA_SIGINFO;
+  TEST_PCHECK(sigaction(SIGSEGV, &sa, nullptr) == 0);
+
+  si_code_received = 0;
+  if (sigsetjmp(jmpbuf, 1) == 0) {
+    if (write) {
+      *static_cast<volatile char*>(addr) = 1;
+    } else {
+      (void)*static_cast<volatile char*>(addr);
+    }
+  }
+  return si_code_received;
+}
+
+// A fault on an address no vma covers is SEGV_MAPERR for any access type.
+TEST_F(MMapTest, UnmappedIsMapErr) {
+  const auto rest = [&] {
+    void* p = mmap(nullptr, kPageSize, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    TEST_PCHECK(p != MAP_FAILED);
+    TEST_PCHECK(munmap(p, kPageSize) == 0);
+    TEST_CHECK(SigsegvCode(p, /*write=*/false) == SEGV_MAPERR);
+    TEST_CHECK(SigsegvCode(p, /*write=*/true) == SEGV_MAPERR);
+  };
+  EXPECT_THAT(InForkedProcess(rest), IsPosixErrorOkAndHolds(0));
+}
+
+TEST_F(MMapTest, WriteReadOnlyIsAccErr) {
+  const auto rest = [&] {
+    void* p =
+        mmap(nullptr, kPageSize, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    TEST_PCHECK(p != MAP_FAILED);
+    TEST_CHECK(SigsegvCode(p, /*write=*/true) == SEGV_ACCERR);
+  };
+  EXPECT_THAT(InForkedProcess(rest), IsPosixErrorOkAndHolds(0));
+}
+
 // Verify that calling mprotect with an absurdly huge length fails.
 TEST_F(MMapTest, MprotectHugeLength) {
   uintptr_t addr;
