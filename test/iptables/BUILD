@@ -36,7 +36,7 @@ go_test(
         "iptables_test.go",
     ],
     data = ["//test/iptables/runner"],
-    library = ":iptables",
+    embed = [":iptables"],
     local = True,
     tags = [
         "manual",
@@ -57,7 +57,7 @@ go_test(
     ],
     args = ["-iptables-nft=true"],
     data = ["//test/iptables/runner"],
-    library = ":iptables",
+    embed = [":iptables"],
     local = True,
     tags = [
         "manual",
