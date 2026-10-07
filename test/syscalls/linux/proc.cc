@@ -3715,6 +3715,62 @@ TEST(ProcPid, RootDumpableOwner) {
   EXPECT_THAT(st.st_gid, AnyOf(Eq(0), Eq(65534)));
 }
 
+// The owner of /proc/PID/fd and friends follows the task's current
+// credentials, not the ones it had when the entries were first looked up.
+TEST(ProcPid, FdOwnerFollowsSetuid) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SETUID)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SETGID)));
+  constexpr int kNobody = 65534;
+
+  int ready[2], done[2];
+  ASSERT_THAT(pipe(ready), SyscallSucceeds());
+  ASSERT_THAT(pipe(done), SyscallSucceeds());
+
+  pid_t const child_pid = fork();
+  if (child_pid == 0) {
+    // Instantiate the entries while still root.
+    struct stat st;
+    TEST_PCHECK(stat("/proc/self/fd", &st) == 0);
+    TEST_PCHECK(stat("/proc/self/fdinfo", &st) == 0);
+    TEST_PCHECK(lstat("/proc/self/fd/0", &st) == 0);
+    TEST_PCHECK(syscall(SYS_setresgid, kNobody, kNobody, kNobody) == 0);
+    TEST_PCHECK(syscall(SYS_setresuid, kNobody, kNobody, kNobody) == 0);
+    // Changing credentials cleared dumpability.
+    TEST_PCHECK(prctl(PR_SET_DUMPABLE, SUID_DUMP_USER) == 0);
+    char c = 0;
+    TEST_PCHECK(WriteFd(ready[1], &c, 1) == 1);
+    TEST_PCHECK(ReadFd(done[0], &c, 1) == 1);
+    _exit(0);
+  }
+  ASSERT_THAT(child_pid, SyscallSucceeds());
+
+  char c;
+  ASSERT_THAT(ReadFd(ready[0], &c, 1), SyscallSucceedsWithValue(1));
+  for (const char* name : {"fd", "fdinfo", "fd/0"}) {
+    SCOPED_TRACE(name);
+    struct stat st;
+    ASSERT_THAT(
+        lstat(absl::StrCat("/proc/", child_pid, "/", name).c_str(), &st),
+        SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, kNobody);
+    EXPECT_EQ(st.st_gid, kNobody);
+  }
+  ScopedThread t([&] {
+    ASSERT_THAT(syscall(SYS_setuid, kNobody), SyscallSucceeds());
+    EXPECT_NO_ERRNO(
+        Open(absl::StrCat("/proc/", child_pid, "/fd"), O_RDONLY | O_DIRECTORY));
+  });
+  t.Join();
+
+  ASSERT_THAT(WriteFd(done[1], &c, 1), SyscallSucceedsWithValue(1));
+  int status;
+  ASSERT_THAT(waitpid(child_pid, &status, 0), SyscallSucceeds());
+  EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << status;
+  for (int fd : {ready[0], ready[1], done[0], done[1]}) {
+    EXPECT_THAT(close(fd), SyscallSucceeds());
+  }
+}
+
 TEST(Proc, GetdentsEnoent) {
   FileDescriptor fd;
   ASSERT_NO_ERRNO(WithSubprocess(
