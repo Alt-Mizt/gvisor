@@ -1033,7 +1033,7 @@ func (s *statusFD) Generate(ctx context.Context, buf *bytes.Buffer) error {
 	egid := creds.EffectiveKGID.In(s.userns).OrOverflow()
 	sgid := creds.SavedKGID.In(s.userns).OrOverflow()
 	var fds int
-	var vss, rss, data uint64
+	var vss, hwm, rss, data uint64
 	s.task.WithMuLocked(func(t *kernel.Task) {
 		if fdTable := t.FDTable(); fdTable != nil {
 			fds = fdTable.CurrentMaxFDs()
@@ -1041,6 +1041,7 @@ func (s *statusFD) Generate(ctx context.Context, buf *bytes.Buffer) error {
 	})
 	if mm := getMM(s.task); mm != nil {
 		vss = mm.VirtualMemorySize()
+		hwm = mm.MaxResidentSetSize()
 		rss = mm.ResidentSetSize()
 		data = mm.VirtualDataSize()
 	}
@@ -1060,6 +1061,7 @@ func (s *statusFD) Generate(ctx context.Context, buf *bytes.Buffer) error {
 	buf.WriteString(" \n")
 
 	fmt.Fprintf(buf, "VmSize:\t%d kB\n", vss>>10)
+	fmt.Fprintf(buf, "VmHWM:\t%d kB\n", max(hwm, rss)>>10)
 	fmt.Fprintf(buf, "VmRSS:\t%d kB\n", rss>>10)
 	fmt.Fprintf(buf, "VmData:\t%d kB\n", data>>10)
 

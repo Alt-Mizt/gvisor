@@ -73,6 +73,7 @@
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
+#include "absl/strings/strip.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
@@ -2214,6 +2215,42 @@ TEST(ProcPidStatTest, VmStats) {
   EXPECT_TRUE(IsDigits(data_str.substr(0, data_str.length() - 3))) << data_str;
   // ... which is not 0.
   EXPECT_NE('0', data_str[0]);
+}
+
+// Returns the value of a "<field>:\t<n> kB" line of /proc/self/status in kB.
+PosixErrorOr<uint64_t> ProcSelfStatusKB(const std::string& field) {
+  ASSIGN_OR_RETURN_ERRNO(std::string contents,
+                         GetContents("/proc/self/status"));
+  ASSIGN_OR_RETURN_ERRNO(auto status, ParseProcStatus(contents));
+  const auto it = status.find(field);
+  if (it == status.end()) {
+    return PosixError(ENOENT, absl::StrCat(field, " not found"));
+  }
+  absl::string_view value(it->second);
+  uint64_t kb;
+  if (!absl::ConsumeSuffix(&value, " kB") || !absl::SimpleAtoi(value, &kb)) {
+    return PosixError(EINVAL, absl::StrCat(field, ": ", it->second));
+  }
+  return kb;
+}
+
+// VmHWM is the peak resident set size: it stays at the high-water mark after
+// memory is released, while VmRSS drops.
+TEST(ProcPidStatusTest, VmHWM) {
+  constexpr size_t kMappingKB = 64 << 10;
+  uint64_t rss_mapped;
+  {
+    Mapping const m = ASSERT_NO_ERRNO_AND_VALUE(MmapAnon(
+        kMappingKB << 10, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_POPULATE));
+    rss_mapped = ASSERT_NO_ERRNO_AND_VALUE(ProcSelfStatusKB("VmRSS"));
+    ASSERT_GE(rss_mapped, kMappingKB);
+  }
+  uint64_t const hwm = ASSERT_NO_ERRNO_AND_VALUE(ProcSelfStatusKB("VmHWM"));
+  uint64_t const rss = ASSERT_NO_ERRNO_AND_VALUE(ProcSelfStatusKB("VmRSS"));
+  EXPECT_GE(hwm, rss);
+  // Linux updates the high-water mark from approximate RSS counters.
+  EXPECT_GE(hwm, rss_mapped * 9 / 10);
+  EXPECT_LT(rss, rss_mapped - kMappingKB / 2);
 }
 
 // Parse an array of NUL-terminated char* arrays, returning a vector of
