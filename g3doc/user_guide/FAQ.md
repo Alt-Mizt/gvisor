@@ -139,6 +139,33 @@ sandbox isolation. There are a few different workarounds you can try:
     will use the host network stack and is less secure.
 *   Use IPs instead of container names.
 *   Use [Kubernetes][k8s]. Container name lookup works fine in Kubernetes.
+*   Use the experimental `--netgofer=proxy-loopback` flag. It proxies the
+    sandbox's outbound traffic through a process in the container's network
+    namespace, which can reach the embedded DNS server, so lookups of container
+    names and public names work with the `/etc/resolv.conf` that Docker writes.
+    Register it as a second runtime and use it only where it is needed:
+
+    ```json
+    {
+        "runtimes": {
+            "runsc": {
+                "path": "/usr/local/bin/runsc"
+            },
+            "runsc-dns": {
+                "path": "/usr/local/bin/runsc",
+                "runtimeArgs": [
+                    "--netgofer=proxy-loopback"
+                ]
+            }
+        }
+    }
+    ```
+
+    This mode only proxies outbound TCP and UDP. A container that runs with it
+    cannot accept incoming connections and cannot `ping`, so keep services that
+    other containers connect to on the regular `runsc` runtime. Inside the
+    sandbox only 127.0.0.1 is a local address; the rest of 127.0.0.0/8 is
+    forwarded, so binding to an address like 127.0.0.2 fails.
 
 ### I'm getting an error like `dial unix /run/containerd/s/09e4...8cff: connect: connection refused: unknown` {#shim-connect}
 
